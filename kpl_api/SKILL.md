@@ -1,7 +1,7 @@
 ---
 name: kpl_api
 description: >
-  KPL（看盘龙）A股量化数据接口。覆盖龙虎榜、实时行情、个股盘口/分时/大单、K线（日/周/月/历史/涨停）、
+  KPL（开盘啦）A股量化数据接口。覆盖龙虎榜、实时行情、个股盘口/分时/大单、K线（日/周/月/历史/涨停）、
   概念板块热点、指数走势、资讯评论、用户自选股，以及日志上报（防风控）。
   触发关键词：KPL、看盘龙、龙虎榜、LongHuBang、涨停、跌停、炸板、盘口、五档、分时、大单、
   K线、日线、周线、月线、板块、题材、概念、热点、指数、行情、人气股、资讯、评论、
@@ -32,7 +32,7 @@ metadata:
 ## Preconditions
 
 1. `skills/kpl_api/scripts/kpl_api.py` 和 `skills/kpl_api/scripts/call_kpl.py` 存在。
-2. Python 环境已安装 `requests` 库。
+2. Python 环境已安装 `requests`、`Pillow` 库（分时图渲染需 Pillow）。
 3. `TOKEN`、`USER_ID`、`DEVICE_ID` 为敏感信息，禁止在回复中明文输出。
 
 ## Execution Steps
@@ -253,6 +253,27 @@ python3 skills/kpl_api/scripts/call_kpl.py --method "stock_trend" --kwargs '{"st
 | `time` | str | `""` | 增量起始时间 |
 ```bash
 python3 skills/kpl_api/scripts/call_kpl.py --method "stock_dadan_trend" --kwargs '{"stock_id":"300827"}'
+```
+
+#### 分时图（含折线图与关键点）
+
+以下方法在获取分时数据的同时**渲染 PNG 折线图**，并返回 **key_points** 关键点数据，便于 skill 应用直接展示与二次处理。
+
+| 方法 | 说明 | 返回字段 |
+|------|------|----------|
+| `stock_trend_chart` | 股票分时+折线图 | `chart_path`, `key_points`, `trend` |
+| `stock_dadan_trend_chart` | 大单分时+折线图 | `chart_path`, `key_points`, `trend` |
+| `zhishu_trend_chart` | 指数/板块分时+折线图 | `chart_path`, `key_points`, `trend` |
+| `zhishu_zs_trend_chart` | 大盘指数走势+折线图 | `chart_path`, `key_points`, `trend` |
+| `conception_bk_fenshi_chart` | 板块分时+折线图 | `chart_path`, `key_points`, `trend` |
+
+**key_points** 结构：`{open, high, low, close, count, time_range, preclose, change_pct}`。  
+图表默认保存至 `/tmp/kpl_charts/`，可通过 `output_dir` 指定目录。
+
+```bash
+python3 skills/kpl_api/scripts/call_kpl.py --method "stock_trend_chart" --kwargs '{"stock_id":"300827"}'
+python3 skills/kpl_api/scripts/call_kpl.py --method "zhishu_trend_chart" --kwargs '{"stock_id":"801070"}'
+python3 skills/kpl_api/scripts/call_kpl.py --method "conception_bk_fenshi_chart" --kwargs '{"plate_id":"801070"}'
 ```
 
 #### `stock_featured_section(stock_id)`
@@ -663,6 +684,7 @@ python3 skills/kpl_api/scripts/call_kpl.py --method "log_simulate_normal_usage"
 | 查某股票盘口/买卖档 | `stock_pankou` | `stock_bid`（五档） |
 | 查某股票实时行情 | `stock_realdata` | — |
 | 查某股票分时走势 | `stock_trend` | `stock_dadan_trend`（大单分时） |
+| 查分时并渲染折线图 | `stock_trend_chart`、`zhishu_trend_chart` | `*_chart` 系列返回 chart_path + key_points |
 | 查某股票所属板块 | `stock_featured_section` | — |
 | 查某股票消息/公告 | `stock_message_bar` | `user_stock_art_title` |
 | 查K线（今日） | `kline_today` | — |

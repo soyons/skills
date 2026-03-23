@@ -3,11 +3,17 @@ KPL (看盘龙) API 接口封装 - 量化交易版
 
 保留量化交易相关接口：龙虎榜、行情、K线、盘口、板块、大单、资金流向等。
 保留日志上报接口用于模拟正常用户行为，避免账号风控。
+分时图接口支持渲染折线图并返回关键点数据。
 """
 
 import json
+import os
 import time as _time
+import tempfile
+from typing import Optional
+
 import requests
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ══════════════════════════════════════════════
@@ -83,6 +89,282 @@ class KPLApi:
             params.update(business)
         resp = self.session.get(url, params=params, timeout=10)
         return resp.json()
+
+    # ──────────────────────────────────────────────
+    # 分时图：解析、关键点、渲染
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_trend(resp: dict) -> tuple[list[str], list[float]]:
+        """从分时接口响应中解析时间序列与价格序列。
+
+        支持格式：
+        - stock_trend: [["09:30", p1, p2, ...], ...]，取 p1 为价格
+        - zhishu_trend: [["09:30", price, ...], ...]，取 index 1 为价格
+        """
+        trend = resp.get("trend") or []
+        times: list[str] = []
+        prices: list[float] = []
+        for row in trend:
+            if not row or len(row) < 2:
+                continue
+            t = str(row[0]) if row[0] else ""
+            try:
+                p = float(row[1])
+            except (TypeError, ValueError):
+                continue
+            times.append(t)
+            prices.append(p)
+        return times, prices
+
+    @staticmethod
+    def _compute_key_points(
+        times: list[str], prices: list[float], resp: dict
+    ) -> dict:
+        """计算分时关键点数据。"""
+        if not prices:
+            return {
+                "open": None,
+                "high": None,
+                "low": None,
+                "close": None,
+                "count": 0,
+                "time_range": None,
+                "preclose": resp.get("preclose_px") or resp.get("pre_close"),
+            }
+        open_p = prices[0]
+        high_p = max(prices)
+        low_p = min(prices)
+        close_p = prices[-1]
+        time_range = (times[0], times[-1]) if times else None
+        preclose = resp.get("preclose_px") or resp.get("pre_close")
+        change_pct = (
+            round((close_p - preclose) / preclose * 100, 2)
+            if preclose and preclose != 0
+            else None
+        )
+        return {
+            "open": round(open_p, 2),
+            "high": round(high_p, 2),
+            "low": round(low_p, 2),
+            "close": round(close_p, 2),
+            "count": len(prices),
+            "time_range": time_range,
+            "preclose": preclose,
+            "change_pct": change_pct,
+        }
+
+    @staticmethod
+    def _render_png_line_chart(
+        times: list[str],
+        prices: list[float],
+        title: str,
+        output_path: str,
+        width: int = 640,
+        height: int = 360,
+        up_color: str = "#e74c3c",
+        down_color: str = "#27ae60",
+    ) -> None:
+        """渲染分时折线图为 PNG 文件。"""
+        if len(prices) < 2:
+            min_p, max_p = (prices[0], prices[0]) if prices else (0, 0)
+        else:
+            min_p = min(prices)
+            max_p = max(prices)
+        span = max_p - min_p if max_p != min_p else 1
+        pad = span * 0.05
+        y_lo = min_p - pad
+        y_hi = max_p + pad
+        y_span = y_hi - y_lo
+
+        margin = {"t": 50, "r": 60, "b": 50, "l": 70}
+        inner_w = width - margin["l"] - margin["r"]
+        inner_h = height - margin["t"] - margin["b"]
+
+        def _x(i: int) -> float:
+            if len(times) <= 1:
+                return margin["l"] + inner_w / 2
+            return margin["l"] + (i / max(1, len(times) - 1)) * inner_w
+
+        def _y(v: float) -> float:
+            return margin["t"] + inner_h * (1 - (v - y_lo) / y_span)
+
+        def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+            h = h.lstrip("#")
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+        img = Image.new("RGB", (width, height), (250, 250, 250))
+        draw = ImageDraw.Draw(img)
+
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+            font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+        except OSError:
+            font_title = ImageFont.load_default()
+            font_label = font_title
+
+        draw.text((width // 2 - 50, 12), title, fill=(51, 51, 51), font=font_title)
+
+        # 坐标轴
+        draw.line(
+            [(margin["l"], margin["t"]), (margin["l"], height - margin["b"])],
+            fill=(204, 204, 204),
+            width=1,
+        )
+        draw.line(
+            [(margin["l"], height - margin["b"]), (width - margin["r"], height - margin["b"])],
+            fill=(204, 204, 204),
+            width=1,
+        )
+
+        # 价格标签
+        draw.text(
+            (margin["l"] - 60, int(_y(max_p)) - 5),
+            f"{max_p:.2f}",
+            fill=(102, 102, 102),
+            font=font_label,
+        )
+        draw.text(
+            (margin["l"] - 60, int(_y(min_p)) - 5),
+            f"{min_p:.2f}",
+            fill=(102, 102, 102),
+            font=font_label,
+        )
+
+        # 折线
+        is_up = prices[-1] >= prices[0] if prices else True
+        rgb = _hex_to_rgb(up_color if is_up else down_color)
+        pts = [(int(_x(i)), int(_y(v))) for i, v in enumerate(prices)]
+        for j in range(1, len(pts)):
+            draw.line([pts[j - 1], pts[j]], fill=rgb, width=2)
+
+        # 时间刻度
+        n_ticks = min(6, len(times))
+        for i in range(n_ticks):
+            idx = int(i * (len(times) - 1) / max(1, n_ticks - 1))
+            if 0 <= idx < len(times):
+                lx, lt = int(_x(idx)), times[idx]
+                draw.text((lx - 15, height - margin["b"] + 8), lt, fill=(102, 102, 102), font=font_label)
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        img.save(output_path, "PNG")
+
+    def stock_trend_chart(
+        self,
+        stock_id: str,
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """获取股票分时走势，渲染折线图并返回关键点数据。
+
+        Args:
+            stock_id: 股票代码
+            output_dir: 图表输出目录，默认 /tmp/kpl_charts
+        """
+        resp = self.stock_trend(stock_id)
+        if resp.get("errcode") != "0":
+            return resp
+        times, prices = self._parse_trend(resp)
+        key_points = self._compute_key_points(times, prices, resp)
+        out_dir = output_dir or os.path.join(tempfile.gettempdir(), "kpl_charts")
+        chart_path = os.path.join(out_dir, f"stock_trend_{stock_id}_{resp.get('day', '')}.png")
+        self._render_png_line_chart(
+            times, prices,
+            title=f"{stock_id} 分时",
+            output_path=chart_path,
+        )
+        resp["chart_path"] = chart_path
+        resp["key_points"] = key_points
+        return resp
+
+    def stock_dadan_trend_chart(
+        self,
+        stock_id: str,
+        time: str = "",
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """获取股票大单分时走势，渲染折线图并返回关键点数据。"""
+        resp = self.stock_dadan_trend(stock_id, time)
+        if resp.get("errcode") != "0":
+            return resp
+        times, prices = self._parse_trend(resp)
+        key_points = self._compute_key_points(times, prices, resp)
+        out_dir = output_dir or os.path.join(tempfile.gettempdir(), "kpl_charts")
+        chart_path = os.path.join(out_dir, f"stock_dadan_{stock_id}_{resp.get('day', '')}.png")
+        self._render_png_line_chart(
+            times, prices,
+            title=f"{stock_id} 大单分时",
+            output_path=chart_path,
+        )
+        resp["chart_path"] = chart_path
+        resp["key_points"] = key_points
+        return resp
+
+    def zhishu_trend_chart(
+        self,
+        stock_id: str,
+        time: str = "",
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """获取指数/板块分时走势，渲染折线图并返回关键点数据。"""
+        resp = self.zhishu_trend(stock_id, time)
+        if resp.get("errcode") != "0":
+            return resp
+        times, prices = self._parse_trend(resp)
+        key_points = self._compute_key_points(times, prices, resp)
+        out_dir = output_dir or os.path.join(tempfile.gettempdir(), "kpl_charts")
+        chart_path = os.path.join(out_dir, f"zhishu_trend_{stock_id}_{resp.get('day', '')}.png")
+        self._render_png_line_chart(
+            times, prices,
+            title=f"{stock_id} 指数分时",
+            output_path=chart_path,
+        )
+        resp["chart_path"] = chart_path
+        resp["key_points"] = key_points
+        return resp
+
+    def zhishu_zs_trend_chart(
+        self,
+        stock_id: str,
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """获取大盘指数走势，渲染折线图并返回关键点数据。"""
+        resp = self.zhishu_zs_trend(stock_id)
+        if resp.get("errcode") != "0":
+            return resp
+        times, prices = self._parse_trend(resp)
+        key_points = self._compute_key_points(times, prices, resp)
+        out_dir = output_dir or os.path.join(tempfile.gettempdir(), "kpl_charts")
+        chart_path = os.path.join(out_dir, f"zhishu_zs_{stock_id}_{resp.get('day', '')}.png")
+        self._render_png_line_chart(
+            times, prices,
+            title=f"{stock_id} 大盘走势",
+            output_path=chart_path,
+        )
+        resp["chart_path"] = chart_path
+        resp["key_points"] = key_points
+        return resp
+
+    def conception_bk_fenshi_chart(
+        self,
+        plate_id: str,
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """获取板块分时走势，渲染折线图并返回关键点数据。"""
+        resp = self.conception_bk_fenshi(plate_id)
+        if resp.get("errcode") != "0":
+            return resp
+        times, prices = self._parse_trend(resp)
+        key_points = self._compute_key_points(times, prices, resp)
+        out_dir = output_dir or os.path.join(tempfile.gettempdir(), "kpl_charts")
+        chart_path = os.path.join(out_dir, f"plate_fenshi_{plate_id}_{resp.get('day', '')}.png")
+        self._render_png_line_chart(
+            times, prices,
+            title=f"{plate_id} 板块分时",
+            output_path=chart_path,
+        )
+        resp["chart_path"] = chart_path
+        resp["key_points"] = key_points
+        return resp
 
     # ══════════════════════════════════════════════
     # 一、龙虎榜
