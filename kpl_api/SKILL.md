@@ -237,22 +237,44 @@ python3 skills/kpl_api/scripts/call_kpl.py --method "stock_realdata" --kwargs '{
 ```
 
 #### `stock_trend(stock_id)`
-获取股票分时走势。
+获取股票分时走势（从开盘到当前的完整数据）。
+
+**⚠️ 重要：仅在交易时间有效（周一至周五 9:30-15:00），非交易时间返回错误码1017**
+
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `stock_id` | str | 是 | 股票代码 |
+
+**返回数据说明：**
+- `trend`: 二维数组 `[["09:30", 10.52], ["09:31", 10.54], ...]`，包含从开盘到当前的所有分时点（约241个）
+- `preclose_px`: 昨收价
+- `last_px`: 最新价
+- `day`: 交易日期
+
 ```bash
 python3 skills/kpl_api/scripts/call_kpl.py --method "stock_trend" --kwargs '{"stock_id":"300827"}'
 ```
 
 #### `stock_dadan_trend(stock_id, time="")`
 获取股票大单分时走势。
+
+**⚠️ 重要：仅在交易时间有效（周一至周五 9:30-15:00）**
+
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `stock_id` | str | 必填 | 股票代码 |
-| `time` | str | `""` | 增量起始时间 |
+| `time` | str | `""` | 增量起始时间戳。留空=获取全量数据；传入上次返回的`time`字段=仅获取增量数据 |
+
+**使用场景：**
+- 首次调用：`time=""` 获取从开盘到当前的完整数据
+- 实时监控：传入上次的`time`值，仅获取新增数据点，节省带宽
+
 ```bash
+# 获取全量数据
 python3 skills/kpl_api/scripts/call_kpl.py --method "stock_dadan_trend" --kwargs '{"stock_id":"300827"}'
+
+# 增量更新（假设上次返回的time为"1711166400"）
+python3 skills/kpl_api/scripts/call_kpl.py --method "stock_dadan_trend" --kwargs '{"stock_id":"300827","time":"1711166400"}'
 ```
 
 #### 分时图（含折线图与关键点）
@@ -403,11 +425,15 @@ python3 skills/kpl_api/scripts/call_kpl.py --method "conception_bk_fenshi" --kwa
 ```
 
 #### `zhishu_trend(stock_id, time="")`
-获取指数/板块分时走势。
+获取指数/板块分时走势（从开盘到当前的完整数据）。
+
+**⚠️ 重要：仅在交易时间有效（周一至周五 9:30-15:00）**
+
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `stock_id` | str | 必填 | 指数/板块代码 |
-| `time` | str | `""` | 增量起始时间 |
+| `time` | str | `""` | 增量起始时间戳。留空=获取全量数据；传入上次返回的`time`字段=仅获取增量数据 |
+
 ```bash
 python3 skills/kpl_api/scripts/call_kpl.py --method "zhishu_trend" --kwargs '{"stock_id":"801070"}'
 ```
@@ -709,8 +735,119 @@ python3 skills/kpl_api/scripts/call_kpl.py --method "log_simulate_normal_usage"
 - 未经用户明确要求，不得修改 `kpl_api.py` 中的认证参数。
 - 返回内容超过 200 行时，只输出摘要与关键字段。
 
+## 分时数据获取详解
+
+### 交易时间限制
+
+**所有分时接口仅在交易时间内有效：**
+- 交易日：周一至周五（不含法定节假日）
+- 交易时间：09:30 - 15:00
+- 非交易时间调用会返回错误码 `1017`（数据格式不对）
+
+### 数据获取机制
+
+分时接口**默认返回从开盘到当前时间的全量数据**，无需特殊参数：
+
+```bash
+# 首次调用 - 自动获取从09:30到当前的所有分时点
+python3 skills/kpl_api/scripts/call_kpl.py --method "stock_trend" --kwargs '{"stock_id":"600601"}'
+
+# 返回约241个数据点（每分钟一个点，9:30-15:00共241分钟）
+```
+
+### 增量更新策略
+
+对于实时监控场景，使用 `time` 参数进行增量更新：
+
+```bash
+# 1. 首次获取全量数据
+python3 skills/kpl_api/scripts/call_kpl.py --method "stock_dadan_trend" --kwargs '{"stock_id":"600601","time":""}'
+# 返回: {"errcode":"0", "time":"1711166400", "trend":[...241个点...]}
+
+# 2. 5秒后增量更新（仅获取新增数据）
+python3 skills/kpl_api/scripts/call_kpl.py --method "stock_dadan_trend" --kwargs '{"stock_id":"600601","time":"1711166400"}'
+# 返回: {"errcode":"0", "time":"1711166405", "trend":[...仅新增的点...]}
+```
+
+### 数据结构说明
+
+```json
+{
+  "errcode": "0",
+  "errmsg": "",
+  "day": "2024-03-23",
+  "preclose_px": 10.50,
+  "last_px": 10.68,
+  "time": "1711166400",
+  "trend": [
+    ["09:30", 10.52],
+    ["09:31", 10.54],
+    ["09:32", 10.53],
+    ...
+    ["14:59", 10.68]
+  ]
+}
+```
+
+### 常见错误码
+
+| 错误码 | 说明 | 解决方案 |
+|--------|------|----------|
+| `0` | 成功 | - |
+| `1017` | 数据格式不对 | 在交易时间内重试（9:30-15:00） |
+| `1001` | 参数错误 | 检查股票代码格式 |
+| `1002` | 认证失败 | 检查Token是否有效 |
+
+### 非交易时间替代方案
+
+如需在非交易时间查看数据，使用K线接口：
+
+```bash
+# 获取日K线（非交易时间也可用）
+python3 skills/kpl_api/scripts/call_kpl.py --method "kline_today" --kwargs '{"stock_id":"600601","type_":"d"}'
+
+# 获取历史K线
+python3 skills/kpl_api/scripts/call_kpl.py --method "kline_history" --kwargs '{"stock_id":"600601","type_":"d","st":100}'
+```
+
+### 分时图表渲染
+
+使用 `*_chart` 系列方法可自动渲染PNG折线图并返回关键点数据：
+
+```bash
+# 获取分时数据 + 渲染图表 + 计算关键点
+python3 skills/kpl_api/scripts/call_kpl.py --method "stock_trend_chart" --kwargs '{"stock_id":"600601"}'
+
+# 返回:
+# {
+#   "errcode": "0",
+#   "chart_path": "/tmp/kpl_charts/stock_trend_600601_2024-03-23.png",
+#   "key_points": {
+#     "open": 10.52,
+#     "high": 10.75,
+#     "low": 10.48,
+#     "close": 10.68,
+#     "count": 241,
+#     "time_range": ["09:30", "15:00"],
+#     "preclose": 10.50,
+#     "change_pct": 1.71
+#   },
+#   "trend": [...]
+# }
+```
+
+### 性能优化建议
+
+1. **使用增量更新**：实时监控时传入 `time` 参数，避免重复获取全量数据
+2. **批量获取**：需要监控多只股票时使用并发请求
+3. **缓存策略**：同一分钟内的数据不会变化，可缓存60秒
+4. **请求频率**：建议控制在每秒1-2次，避免触发限流
+
+详细文档参见：[docs/分时数据获取指南.md](../docs/分时数据获取指南.md)
+
 ## Additional Notes
 
 - 方法签名来源：`skills/kpl_api/scripts/kpl_api.py`
 - 调用入口：`skills/kpl_api/scripts/call_kpl.py`
 - 本地调用示例见 [examples.md](examples.md)
+- 分时数据详细文档：[docs/分时数据获取指南.md](../docs/分时数据获取指南.md)

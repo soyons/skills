@@ -193,43 +193,77 @@ class KPLApi:
             h = h.lstrip("#")
             return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
-        img = Image.new("RGB", (width, height), (250, 250, 250))
+        img = Image.new("RGB", (width, height), (255, 255, 255))
         draw = ImageDraw.Draw(img)
 
+        # 尝试加载支持中文的字体
         try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-            font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+            # macOS 系统字体
+            font_title = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 16)
+            font_label = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 11)
         except OSError:
-            font_title = ImageFont.load_default()
-            font_label = font_title
+            try:
+                # Linux 系统字体
+                font_title = ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 16)
+                font_label = ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 11)
+            except OSError:
+                try:
+                    # 备用字体
+                    font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+                    font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+                except OSError:
+                    font_title = ImageFont.load_default()
+                    font_label = font_title
 
-        draw.text((width // 2 - 50, 12), title, fill=(51, 51, 51), font=font_title)
+        # 绘制标题（居中）
+        bbox = draw.textbbox((0, 0), title, font=font_title)
+        title_width = bbox[2] - bbox[0]
+        draw.text((width // 2 - title_width // 2, 12), title, fill=(51, 51, 51), font=font_title)
 
-        # 坐标轴
+        # 绘制网格线（水平和垂直）
+        grid_color = (230, 230, 230)
+
+        # 水平网格线（5条）
+        for i in range(5):
+            y_pos = margin["t"] + (inner_h * i / 4)
+            draw.line(
+                [(margin["l"], y_pos), (width - margin["r"], y_pos)],
+                fill=grid_color,
+                width=1,
+            )
+
+        # 垂直网格线（6条，对应时间刻度）
+        n_v_grids = 6
+        for i in range(n_v_grids):
+            x_pos = margin["l"] + (inner_w * i / (n_v_grids - 1))
+            draw.line(
+                [(x_pos, margin["t"]), (x_pos, height - margin["b"])],
+                fill=grid_color,
+                width=1,
+            )
+
+        # 坐标轴（在网格线之上，颜色更深）
         draw.line(
             [(margin["l"], margin["t"]), (margin["l"], height - margin["b"])],
-            fill=(204, 204, 204),
-            width=1,
+            fill=(180, 180, 180),
+            width=2,
         )
         draw.line(
             [(margin["l"], height - margin["b"]), (width - margin["r"], height - margin["b"])],
-            fill=(204, 204, 204),
-            width=1,
+            fill=(180, 180, 180),
+            width=2,
         )
 
-        # 价格标签
-        draw.text(
-            (margin["l"] - 60, int(_y(max_p)) - 5),
-            f"{max_p:.2f}",
-            fill=(102, 102, 102),
-            font=font_label,
-        )
-        draw.text(
-            (margin["l"] - 60, int(_y(min_p)) - 5),
-            f"{min_p:.2f}",
-            fill=(102, 102, 102),
-            font=font_label,
-        )
+        # 价格标签（5个刻度）
+        for i in range(5):
+            price_val = y_hi - (y_span * i / 4)
+            y_pos = margin["t"] + (inner_h * i / 4)
+            draw.text(
+                (margin["l"] - 60, int(y_pos) - 6),
+                f"{price_val:.2f}",
+                fill=(102, 102, 102),
+                font=font_label,
+            )
 
         # 折线
         is_up = prices[-1] >= prices[0] if prices else True
